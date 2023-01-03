@@ -1,0 +1,881 @@
+---
+title: "Final Project"
+author: "B04303061 丁立恆"
+date: "2021/6/18"
+output:
+  word_document: default
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+
+```{r, include=FALSE}
+library(invgamma)
+library(mvtnorm)
+library(coda)
+library(Rcpp)
+library(ggplot2)
+library(tidyverse)
+```
+
+Model:
+$y_t = \sqrt{h_t}\epsilon_t$
+$\log{h_t}=\alpha+\delta \log{h_{t-1}}+\sigma_\nu \nu_t$, $t=1,...,T$
+$(\epsilon_t,\nu_t)\sim N(0,I_2)$
+
+Notation:
+$y_t$: the log return of an asset on day t
+$h_t$: the implicit volatility on day t
+$\alpha$: the intercept
+$\delta$: the volatility persistence
+$\sigma_\nu$: the standard deviation of the shock to $\log h_t$
+
+
+Prior Setting:
+$P(\sigma_\nu)\propto e^{\dfrac{{-v_0s_0^2}/{2\sigma^2}}{\sigma^v_0+1}}$, where $v_o=1$ and $s_0=0.005$
+$\alpha \sim N(0,100)$
+$\delta \sim N(0,1)$
+
+Sampling Procedure:
+Let $\omega$ denote the vector of $(\alpha,\delta,\sigma_\nu)$.
+We can view the model as the hierarchical structure of three conditional distribution $P(\textbf{y}\vert\textbf{h})$, $P(\textbf{h}\vert\omega)$, $P(\omega)$, where $\textbf{y}$ and $\textbf{h}$ are the vectors of data and volatilities.
+
+Then, we break the joint posterior $P(\omega,\textbf{h}\vert\textbf{y})$ into two Gibbs blocks
+(1) $P(\omega\vert\textbf{h},\textbf{y})$ = $P(\omega\vert\textbf{h})$
+(2) $P(\textbf{h}\vert\omega,\textbf{y})$, and further break it into T univariate conditional distributions $P(h_t\vert h_{t-1},h_{t+1},\alpha,\delta,\sigma_\nu,\textbf{y}) \propto \dfrac{1}{h_t^{0.5}}\exp{\dfrac{-y_t^2}{2h_t}}\times\dfrac{1}{h_t}\exp{\dfrac{-(\log h_t-\mu_t)^2}{2\sigma^2}}$, where $t=1,...,T$ and $\mu_t=(\alpha(1-\delta)+\delta(\log h_{t+1}+\log {h_{t-1}}))/(1+\delta^2)$ and $\sigma^2=\sigma^2_\nu/(1+\delta^2)$
+Notably, the author draw $h_0$ and $h_{T+1}$ from AR(1) of the model using the reversibility of AR(1).
+They draw $\log h_0$ by drawing $\nu_0\sim N(0,1)$ and computing it directly from $\alpha+\delta\log h_1+\sigma_\nu\nu_0$.
+
+
+Parameter for this experiment:
+We do 500 times independent trial to obtain the sd and RMSE for each parameter.
+Each trial contains 1000 observations, where $\alpha=-0.368$, $\sigma_\nu=0.26$ and $\delta=0.95$.
+```{r}
+rep_time <- 500
+period <- 1000
+delta <- 0.95
+sigma_nu <- 0.26
+alpha <- -0.368
+iter <- 30000
+burn_in <- 5000
+```
+
+Generate the data for experiment
+```{r}
+sv_generate <- function(alpha, delta, sigma_nu, period){
+  burn <- 200
+  t <- period + burn
+  
+  h_0 <- exp(rnorm(1, alpha/(1-delta), sqrt(sigma_nu^2/(1-delta^2))))
+  h <- c(h_0, rep(0, t))
+  v <- rnorm(t, 0, sigma_nu)
+  for(i in 1:t) h[i+1] <- exp(alpha + delta*log(h[i]) + v[i])
+  
+  z <- rnorm(t, 0, 1)
+  y <- sapply(1:t, function(x) sqrt(h[x+1])*z[x])
+
+  return(y[(burn+1):t])
+}
+```
+
+Create the function to do sampling:
+For $\alpha$, $\delta$ and $\sigma_\nu$, their posterior can get from the result of bayesian simple linear regression. That is, $[\alpha, \delta]\sim N(\mu_n, \sigma^2\Lambda_n^{-1})$ and $\sigma_\nu\sim invGamma(a_n, b_n)$. $\mu_n = (X^TX+\Lambda_0)^{-1}(\Lambda_0\mu_0+X^TX\hat{\beta})$, $\Lambda_n=(X^TX+\Lambda_0)$, $a_n=a_0+n/2$, $b_n=b_0+\dfrac{1}{2}(y^Ty+\mu^T_0\Lambda_0\mu_0-\mu^T_n\Lambda_n\mu_n)$.
+
+For $P(\textbf{h}\vert\omega,\textbf{y})$, we can only write down a not-so-beautiful distribution function, so the author suggest we can use rejection sampling here to get the samples of h. The update procedure will be $h_1$ to $h_T$, then $h_0$ and $h_{T+1}$ so we can get the new $\mu_t$ and $\sigma^2$ in next run.
+
+And, notably, JPR[1] improved the sampling method here, which combine accept/reject and Metropolis-Hastings. Because the posterior of $\textbf{h}$ is not in a sampling-friendly form, they applied Metropolis-Hasting Algorithm for sampling. First, we will draw from $q(h)\propto h_t^{-(\phi+1)}e^{-\theta_t/h_t}$, where $\phi=\phi_1+\phi_{LN}-1$ and $\theta_t=\theta_{1,t}+\theta_{LN,t}$ ($\phi_{LN}=(1-2e^{\sigma^2})/(1-e^{\sigma^2})$,  $\theta_{LN,t}=(\phi_{LN}-0.5)e^{\mu_t+0.5\sigma^2}$ and $\sigma^2=\sigma^2_\nu/(1+\delta^2)$). Second, the accept this draw with probability $min(p(h)/cq(h), 1)$ (rejection sampling part), author set c=1.1 here. If $h_t^{(n+1)}$ is not accepted, repeat $h_t^{(n)}$ and move to $h_{t+1}^{(n+1)}$ (20% rejection rate and less than 1% repeat rate). Note that q(.) is much easier for sampling because it is similar to inverse gamma distribution(${\displaystyle {\frac {\beta ^{\alpha }}{\Gamma (\alpha )}}x^{-\alpha -1}\exp \left(-{\frac {\beta }{x}}\right)}$). We can set $\alpha=\phi$ and $\beta=\theta_t$(rate in r's rinvgamma function, $f(x) = \dfrac{rate^{shape}}{\Gamma(shape)} x^{-1-shape} e^{-rate/x}$) here.
+```{r}
+sv_mcmc <- function(y, iter, burn_in){
+  t <- length(y)
+  
+  # create the store vector, the first component is the initial value
+  alpha <- c(-0.5, rep(0, iter))
+  # bound on (-1, 1) for stationarity
+  delta <- c(0.5, rep(0, iter))
+  sigma_nu <- c(1, rep(0, iter))
+  h <- matrix(data=NA, nrow=iter+1, ncol=t+2,
+              dimnames=list(seq(1,iter+1), paste0('h_',seq(0,t+1))) )
+  
+  # for h's initial value
+  # h_1 to h_T
+  h[1, 1] <- exp( rnorm(1, alpha[1]/(1-delta[1]), sigma_nu[1]/sqrt(1-delta[1]^2)) )
+  for(i in 2:(t+2)){
+    h[1, i] <- exp(alpha[1] + delta[1]*log(h[1,i-1]) + sigma_nu[1]*rnorm(1,0,1))
+  }
+  
+  reject_cnt <- 0
+  
+  v0 <- 1
+  s0 <- 0.005
+  a0 <- v0/2
+  b0 <- 1/2 * v0 * s0^2
+  sigma2_0 <- rinvgamma(1, shape=a0, rate=b0)
+  mu_0 <- c(0, 0)
+  delta0 <- solve(matrix(c(100, 0, 0, 10), ncol=2)/sigma2_0)
+  for(i in 2:(iter+1)){
+    # for new alpha, delta, sigma_nu
+    # run a linear regression to find mean and sd for alpha and delta, 
+    # log(h_{t+1}) ~ log(h_{t})
+    
+    y_lm <- log(h[i-1, 3:(t+1)])
+    X <- matrix(c(rep(1, t-1), log(h[i-1, 2:t])), ncol=2)
+    
+    model <- lm( y_lm ~ X )
+    coef <- coef(summary(model))[, c("Estimate")]
+    
+    X_dot <- t(X) %*% X
+    mu_n <- solve( X_dot + delta0 ) %*% (delta0 %*% mu_0 + X_dot %*% coef)
+    delta_n <- X_dot + delta0
+    an <- a0 + (t-1)/2
+    bn <- b0 + 1/2*( t(y_lm) %*% y_lm - t(mu_n) %*% delta_n %*% mu_n)
+    
+    sigma_nu[i] <- sqrt(rinvgamma(1, shape=an, rate=bn))
+    omega <- rmvnorm(1, mu_n, solve(delta_n)*sigma_nu[i]^2)
+    alpha[i] <- omega[1]
+    delta[i] <- omega[2]
+    
+    # for tons of h, h_1 to h_T
+    # *1 and *2 are parameters for inverse gamma phi(shape) and theta(scale)
+    # *1
+    # for phi, sigma, phi1 and phi_LN are hyperparameters
+    sigma <- sqrt( sigma_nu[i]^2 / (1 + delta[i]^2) )
+    phi_LN = (1 - 2*exp(sigma^2)) / (1 - exp(sigma^2))
+    phi1 = -0.5
+    phi = phi1 + phi_LN - 1
+    
+    # update h_0
+    h[i, 1] <- exp( alpha[i] + delta[i]*log(h[i-1, 2]) + sigma_nu[i]*rnorm(1, 0, 1) )
+    
+    # index 1 is t=0, so this loop iterate from t=1 to t=T
+    for(j in 2:(t+1)){
+      # *2
+      # for theta, mu_t, theta1_t and theta_LN_t are hyperparameters
+      mu_t = ( alpha[i]*(1-delta[i]) + delta[i]*( log(h[i-1, j+1]) + log(h[i, j-1]) ) ) /
+        (1 + delta[i]^2)
+      theta1_t = y[j-1]^2 / 2
+      theta_LN_t = (phi_LN - 0.5) * exp(mu_t + 0.5*sigma^2)
+      theta_t = theta1_t + theta_LN_t
+        
+      # candidate h for t=j-1
+      h_temp <- rinvgamma(1, shape=phi, rate=theta_t)
+      q_value <- dinvgamma(h_temp, shape=phi, rate=theta_t)
+      p_value <- (1 / h_temp^0.5) * exp(-y[j-1]^2 / (2*h_temp)) * (1 / h_temp) *
+        exp(-(log(h_temp) - mu_t)^2 / (2*sigma^2)) 
+      
+      q_mode <- theta_t / (phi+1)
+      p_mode_value <- (1 / q_mode^0.5) * exp(-y[j-1]^2 / (2*q_mode)) * (1 / q_mode) *
+        exp(-(log(q_mode) - mu_t)^2 / (2*sigma^2)) 
+      q_mode_value <- dinvgamma(q_mode, shape=phi, rate=theta_t)
+      c <- 1.1 * p_mode_value / q_mode_value
+      
+      # decide whether accept this draw
+      if(q_value == 0){
+        accept_prob <- 1
+      }else if(q_value == Inf){
+        accept_prob <- 0
+      }else{
+        accept_prob <- min( p_value / (c*q_value), 1 )
+      }
+      
+      # if prob > accept_prob, then repeat, o/w accept
+      prob <- runif(1, 0, 1)
+      if(prob > accept_prob){
+        reject_cnt <- reject_cnt + 1
+        h[i, j] <- h[i-1, j]
+      }else{
+        h[i, j] <- h_temp
+      }
+    }
+    
+    # update h_{T+1}
+    h[i, t+2] <- exp( alpha[i] + delta[i]*log(h[i, t+1]) + sigma_nu[i]*rnorm(1, 0, 1) )
+  }
+  
+  alpha_out <- alpha[(burn_in+1):iter]
+  delta_out <- delta[(burn_in+1):iter]
+  sigma_nu_out <- sigma_nu[(burn_in+1):iter]
+  h_out <- h[(burn_in+1):iter, 2:(t+1)]
+  
+  return_list <- list(alpha=alpha_out,
+                      delta=delta_out,
+                      sigma_nu=sigma_nu_out,
+                      E_h=apply(h_out,1,mean),
+                      Var_h=apply(h_out,1,var),
+                      reject_cnt=reject_cnt)
+}
+```
+
+The function use for visualizing and summarizing for the sample draw from single experiment.
+```{r}
+plot_function <- function(dat_list){
+  plot(dat_list[["alpha"]], type="l", main="alpha", xlab="iteration", ylab="")
+  plot(dat_list[["delta"]], type="l", main="delta", xlab="iteration", ylab="")
+  plot(dat_list[["sigma_nu"]], type="l", main="sigma", xlab="iteration", ylab="")
+  plot(dat_list[["E_h"]], type="l", main="E_h", xlab="iteration", ylab="")
+  plot(dat_list[["Var_h"]], type="l", main="Var_h", xlab="iteration", ylab="")
+  plot(dat_list[["E_h"]]^2/dat_list[["Var_h"]], type="l", main="Coefficient of Variation", xlab="iteration", ylab="")
+}
+
+summary_cal_single <- function(vec){
+  mean <- mean(vec)
+  sd <- sd(vec)
+  
+  return( c(mean, sd) )
+}
+
+summary_function_single <- function(dat_list){
+  E_h <- 0.0009
+  Var_h <- 0.0009^2
+  reject_cnt <- 0.2
+  
+  dat_list[["reject_cnt"]] <- dat_list[["reject_cnt"]] / (period*iter)
+  info_mat <- matrix(nrow=3, ncol=length(dat_list),
+                     dimnames=list( c("true", "mean", "sd"), c(names(dat_list)) ))
+  
+  for(i in names(dat_list)){
+    info_mat[,i] <- c(get(i), summary_cal_single(dat_list[[i]]))
+  }
+  
+  return(info_mat)
+}
+```
+
+```{r, cache=TRUE}
+set.seed(123123123)
+
+y <- sv_generate(alpha, delta, sigma_nu, period)
+system.time({ sv_mcmc_output <- sv_mcmc(y, iter, burn_in) })
+```
+
+```{r, cache=TRUE}
+plot_function(sv_mcmc_output)
+```
+```{r, cache=TRUE}
+summary_function_single(sv_mcmc_output)
+```
+
+The result doesn't look great, and I think it doesn't converge.
+
+
+Since the experiment need to run 25000 iterations and repeat 500 times, it will take tons of time to run 1 experiment. As the result, I rewrite the code in Rcpp for speeding up the experiment.
+```{r, warning=FALSE}
+sv_mcmc_str <- '
+#include <RcppArmadillo.h>
+// [[Rcpp::depends(RcppArmadillo)]]
+#include <RcppEigen.h>
+// [[Rcpp::depends(RcppEigen)]]
+#include <mvt.h>
+// [[Rcpp::depends(RcppDist)]]
+
+using namespace Rcpp;
+using namespace arma;
+
+
+// [[Rcpp::export]]
+Rcpp::List fastLm(const arma::mat& X, const arma::colvec& y) {
+  int n = X.n_rows, k = X.n_cols;
+  
+  arma::colvec coef = arma::solve(X, y);
+  arma::colvec resid = y - X*coef;
+  
+  double sig2 = arma::as_scalar(arma::trans(resid)*resid/(n-k));
+  arma::colvec sterr = arma::sqrt(sig2 *
+    arma::diagvec(arma::pinv(arma::trans(X)*X)));
+  
+  return Rcpp::List::create(Rcpp::Named("coefficients") = coef,
+                            Rcpp::Named("stderr") = sterr,
+                            Rcpp::Named("residuals") = resid,
+                            Rcpp::Named("df.residual") = n - k );
+}
+
+// [[Rcpp::export]]
+List sv_mcmc_cpp(NumericVector y, int iter, int burn_in){
+  int t = y.size();
+  
+  NumericVector alpha(iter+1, 0.0);
+  NumericVector delta(iter+1, 0.0);
+  NumericVector sigma_nu(iter+1, 0.0);
+  alpha(0) = -0.5;
+  delta(0) = 0.5;
+  sigma_nu(0) = 1;
+  NumericMatrix h(iter+1, t+2);
+  
+  h(0, 0) = exp( rnorm(1, alpha(0)/(1-delta(0)), sigma_nu(0)/sqrt(1-pow(delta(0),2)) )[0] );
+  for(int i=1; i <= (t+1); i++){
+    h(0, i) = exp( alpha(0) + delta(0)*log(h(0, i-1)) + sigma_nu(0)*rnorm(1,0,1)[0] );
+  }
+  
+  double reject_cnt = 0.0;
+  
+  double v0 = 1;
+  double s0 = 0.005;
+  double a0 = v0/2;
+  double b0 = 0.5 * v0 * pow(s0, 2);
+  double prec0 = rgamma(1, a0, 1/b0)[0];
+  double sigma2_0 = 1/prec0;
+ 
+  arma::colvec mu_0 = zeros(2);
+  arma::mat delta0 = zeros(2, 2);
+  delta0(0, 0) = 100;
+  delta0(1, 1) = 10;
+  delta0 = inv( delta0 / sigma2_0 );
+  
+  for(int i=1; i <= iter; i++){
+    // create input for lm evaluation
+    arma::colvec y_lm(t-1);
+    arma::mat X(t-1, 2);
+    
+    for(int k=1; k<t; k++){
+      y_lm(k-1) = log(h(i-1, k+1));
+      X(k-1, 0) = 1;
+      X(k-1, 1) = log(h(i-1, k));
+    }
+    
+    List lm_list = fastLm(X, y_lm);
+    // update new parameters
+    arma::colvec beta_hat = lm_list["coefficients"];
+    arma::mat X_dot = X.t()*X;
+    arma::colvec mu_n = inv( X_dot + delta0 ) * (delta0 * mu_0 + X_dot * beta_hat);
+    arma::mat delta_n = X_dot + delta0;
+    double an = a0 + (t-1)/2;
+    double bn = b0 + 0.5*( arma::as_scalar(y_lm.t()*y_lm) - as_scalar(mu_n.t() * delta_n * mu_n));
+    double prec_n = rgamma(1, an, 1/bn)[0];
+    sigma_nu[i] = sqrt(1/prec_n);
+    
+    arma::mat omega = rmvnorm(1, mu_n, inv(delta_n)*pow(sigma_nu[i], 2));
+    while(omega[1] >= 1){
+        omega = rmvnorm(1, mu_n, inv(delta_n)*pow(sigma_nu[i], 2));
+    }
+    alpha[i] = omega[0];
+    delta[i] = omega[1];
+    
+    //parameters for inverse gamma
+    double sigma = sqrt( pow(sigma_nu[i], 2) / (1 + pow(delta[i], 2)) );
+    double phi_LN = (1 - 2*exp(pow(sigma, 2))) / (1 - exp(pow(sigma, 2)));
+    double phi1 = -0.5;
+    double phi = phi1 + phi_LN - 1;
+    //Rcout << "step 4" << std::endl;
+    //update h_0
+    h(i, 0) = exp( alpha[i] + delta[i]*log(h(i-1, 1)) + sigma_nu[i]*rnorm(1, 0, 1)[0]);
+    for(int j=1; j<=t; j++){
+      double mu_t = ( alpha[i]*(1-delta[i]) + delta[i]*( log(h(i-1, j+1)) + log(h(i, j-1)) ) ) /
+        (1 + pow(delta[i], 2));
+      double theta1_t = pow(y[j-1], 2) / 2;
+      double theta_LN_t = (phi_LN - 0.5) * exp(mu_t + 0.5*pow(sigma, 2));
+      double theta_t = theta1_t + theta_LN_t;
+      
+      //draw candidate h for t=j
+      double h_inv_temp = rgamma(1, phi, 1/theta_t)[0];
+      double h_temp = 1/h_inv_temp;
+      
+      //calculate q and p
+      double q_value = R::dgamma(h_inv_temp, phi, 1/theta_t, 0);
+      double p_value = (1/pow(h_temp, 1/2)) * exp(-pow(y[j-1], 2)/(2*h_temp)) * (1/h_temp) *
+        exp(-pow((log(h_temp) - mu_t), 2) / (2*pow(sigma, 2)));
+      
+      double q_mode =  theta_t / (phi+1);
+      double p_mode_value = (1/pow(q_mode, 1/2)) * exp(-pow(y[j-1], 2)/(2*q_mode)) * (1/q_mode) *
+        exp(-pow((log(q_mode) - mu_t), 2) / (2*pow(sigma, 2)));
+      double q_mode_value = R::dgamma(1/q_mode, phi, 1/theta_t, 0);
+      double c = 1.1 * p_mode_value / q_mode_value;
+      
+      double accept_prob;
+      if(q_value == 0){
+        accept_prob = 1.0;
+      }
+      else if( traits::is_infinite<REALSXP>(q_value) ){
+        accept_prob = 0.0;
+      }
+      else{
+        accept_prob = std::min( p_value / (c*q_value), 1.0 );
+      }
+      //Rcout << c << " " << accept_prob << std::endl;
+      
+      double prob = runif(1, 0, 1)[0];
+      if(prob > accept_prob){
+        reject_cnt = reject_cnt + 1;
+        h(i, j) = h(i-1, j);
+      }
+      else{
+        h(i, j) = h_temp;
+      }
+    }
+    
+    h(i, t+1) = exp( alpha[i] + delta[i]*log(h(i, t)) + sigma_nu[i]*rnorm(1, 0, 1)[0] );
+  }
+  
+  NumericVector alpha_out = alpha[Range(burn_in+1, iter)];
+  NumericVector delta_out = delta[Range(burn_in+1, iter)];
+  NumericVector sigma_nu_out = sigma_nu[Range(burn_in+1, iter)];
+  
+  NumericVector E_h(iter-burn_in, 0.0);
+  NumericVector Var_h(iter-burn_in, 0.0);
+  NumericVector tmp(t);
+  for(int i=1; i<=(iter-burn_in); i++){
+    for(int k=1; k<=t; k++){
+      tmp[k-1] = h(burn_in + i -1, k);
+    }
+    E_h[i-1] = mean(tmp);
+    Var_h[i-1] = var(tmp);
+  }
+  
+  List ret_list = List::create(Rcpp::Named("alpha") = alpha_out,
+                               Rcpp::Named("delta") = delta_out,
+                               Rcpp::Named("sigma_nu") = sigma_nu_out,
+                               Rcpp::Named("E_h") = E_h,
+                               Rcpp::Named("Var_h") = Var_h,
+                               Rcpp::Named("reject_cnt") = reject_cnt);
+  
+  return ret_list;
+}
+'
+
+sourceCpp(code = sv_mcmc_str)
+```
+
+The function speeds up with Rcpp get the result 20 times faster than the original function.
+```{r,cache=TRUE}
+set.seed(123123123)
+y <- sv_generate(alpha, delta, sigma_nu, period)
+system.time({ sv_mcmc_output <- sv_mcmc_cpp(y, iter, burn_in) })
+```
+```{r,cache=TRUE}
+plot_function(sv_mcmc_output)
+```
+```{r, cache=TRUE}
+summary_function_single(sv_mcmc_output)
+```
+
+In some cases, it converges, but to the wrong place.
+```{r, cache=TRUE}
+set.seed(31892134)
+y <- sv_generate(alpha, delta, sigma_nu, period)
+sv_mcmc_output <- sv_mcmc_cpp(y, iter, burn_in) 
+```
+
+```{r, cache=TRUE}
+plot_function(sv_mcmc_output)
+```
+
+```{r}
+summary_function_single(sv_mcmc_output)
+```
+
+
+The function only stores the posterior mean.
+```{r}
+sv_mcmc_mean_str <- '
+#include <RcppArmadillo.h>
+// [[Rcpp::depends(RcppArmadillo)]]
+#include <RcppEigen.h>
+// [[Rcpp::depends(RcppEigen)]]
+#include <mvt.h>
+// [[Rcpp::depends(RcppDist)]]
+
+using namespace Rcpp;
+using namespace arma;
+
+
+// [[Rcpp::export]]
+Rcpp::List fastLm(const arma::mat& X, const arma::colvec& y) {
+  int n = X.n_rows, k = X.n_cols;
+  
+  arma::colvec coef = arma::solve(X, y);
+  arma::colvec resid = y - X*coef;
+  
+  double sig2 = arma::as_scalar(arma::trans(resid)*resid/(n-k));
+  arma::colvec sterr = arma::sqrt(sig2 *
+    arma::diagvec(arma::pinv(arma::trans(X)*X)));
+  
+  return Rcpp::List::create(Rcpp::Named("coefficients") = coef,
+                            Rcpp::Named("stderr") = sterr,
+                            Rcpp::Named("residuals") = resid,
+                            Rcpp::Named("df.residual") = n - k );
+}
+
+// [[Rcpp::export]]
+NumericVector sv_mcmc_mean_cpp(NumericVector y, int iter, int burn_in){
+  int t = y.size();
+  
+  NumericVector alpha(iter+1, 0.0);
+  NumericVector delta(iter+1, 0.0);
+  NumericVector sigma_nu(iter+1, 0.0);
+  alpha(0) = -0.5;
+  delta(0) = 0.5;
+  sigma_nu(0) = 1;
+  NumericMatrix h(iter+1, t+2);
+  
+  h(0, 0) = exp( rnorm(1, alpha(0)/(1-delta(0)), sigma_nu(0)/sqrt(1-pow(delta(0),2)) )[0] );
+  for(int i=1; i <= (t+1); i++){
+    h(0, i) = exp( alpha(0) + delta(0)*log(h(0, i-1)) + sigma_nu(0)*rnorm(1,0,1)[0] );
+  }
+  
+  double reject_cnt = 0.0;
+  
+  double v0 = 1;
+  double s0 = 0.005;
+  double a0 = v0/2;
+  double b0 = 0.5 * v0 * pow(s0, 2);
+  double prec0 = rgamma(1, a0, 1/b0)[0];
+  double sigma2_0 = 1/prec0;
+ 
+  arma::colvec mu_0 = zeros(2);
+  arma::mat delta0 = zeros(2, 2);
+  delta0(0, 0) = 100;
+  delta0(1, 1) = 10;
+  delta0 = inv( delta0 / sigma2_0 );
+  
+  for(int i=1; i <= iter; i++){
+    // create input for lm evaluation
+    arma::colvec y_lm(t-1);
+    arma::mat X(t-1, 2);
+    
+    for(int k=1; k<t; k++){
+      y_lm(k-1) = log(h(i-1, k+1));
+      X(k-1, 0) = 1;
+      X(k-1, 1) = log(h(i-1, k));
+    }
+    
+    List lm_list = fastLm(X, y_lm);
+    // update new parameters
+    arma::colvec beta_hat = lm_list["coefficients"];
+    arma::mat X_dot = X.t()*X;
+    arma::colvec mu_n = inv( X_dot + delta0 ) * (delta0 * mu_0 + X_dot * beta_hat);
+    arma::mat delta_n = X_dot + delta0;
+    double an = a0 + (t-1)/2;
+    double bn = b0 + 0.5*( arma::as_scalar(y_lm.t()*y_lm) - as_scalar(mu_n.t() * delta_n * mu_n));
+    double prec_n = rgamma(1, an, 1/bn)[0];
+    sigma_nu[i] = sqrt(1/prec_n);
+    
+    arma::mat omega = rmvnorm(1, mu_n, inv(delta_n)*pow(sigma_nu[i], 2));
+    while(omega[1] >= 1){
+        omega = rmvnorm(1, mu_n, inv(delta_n)*pow(sigma_nu[i], 2));
+    }
+    alpha[i] = omega[0];
+    delta[i] = omega[1];
+    
+    //parameters for inverse gamma
+    double sigma = sqrt( pow(sigma_nu[i], 2) / (1 + pow(delta[i], 2)) );
+    double phi_LN = (1 - 2*exp(pow(sigma, 2))) / (1 - exp(pow(sigma, 2)));
+    double phi1 = -0.5;
+    double phi = phi1 + phi_LN - 1;
+    //Rcout << "step 4" << std::endl;
+    //update h_0
+    h(i, 0) = exp( alpha[i] + delta[i]*log(h(i-1, 1)) + sigma_nu[i]*rnorm(1, 0, 1)[0]);
+    for(int j=1; j<=t; j++){
+      double mu_t = ( alpha[i]*(1-delta[i]) + delta[i]*( log(h(i-1, j+1)) + log(h(i, j-1)) ) ) /
+        (1 + pow(delta[i], 2));
+      double theta1_t = pow(y[j-1], 2) / 2;
+      double theta_LN_t = (phi_LN - 0.5) * exp(mu_t + 0.5*pow(sigma, 2));
+      double theta_t = theta1_t + theta_LN_t;
+      
+      //draw candidate h for t=j
+      double h_inv_temp = rgamma(1, phi, 1/theta_t)[0];
+      double h_temp = 1/h_inv_temp;
+      
+      //calculate q and p
+      double q_value = R::dgamma(h_inv_temp, phi, 1/theta_t, 0);
+      double p_value = (1/pow(h_temp, 1/2)) * exp(-pow(y[j-1], 2)/(2*h_temp)) * (1/h_temp) *
+        exp(-pow((log(h_temp) - mu_t), 2) / (2*pow(sigma, 2)));
+      
+      double q_mode =  theta_t / (phi+1);
+      double p_mode_value = (1/pow(q_mode, 1/2)) * exp(-pow(y[j-1], 2)/(2*q_mode)) * (1/q_mode) *
+        exp(-pow((log(q_mode) - mu_t), 2) / (2*pow(sigma, 2)));
+      double q_mode_value = R::dgamma(1/q_mode, phi, 1/theta_t, 0);
+      double c = 1.1 * p_mode_value / q_mode_value;
+      
+      double accept_prob;
+      if(q_value == 0){
+        accept_prob = 1.0;
+      }
+      else if( traits::is_infinite<REALSXP>(q_value) ){
+        accept_prob = 0.0;
+      }
+      else{
+        accept_prob = std::min( p_value / (c*q_value), 1.0 );
+      }
+      //Rcout << c << " " << accept_prob << std::endl;
+      
+      double prob = runif(1, 0, 1)[0];
+      if(prob > accept_prob){
+        reject_cnt = reject_cnt + 1;
+        h(i, j) = h(i-1, j);
+      }
+      else{
+        h(i, j) = h_temp;
+      }
+    }
+    
+    h(i, t+1) = exp( alpha[i] + delta[i]*log(h(i, t)) + sigma_nu[i]*rnorm(1, 0, 1)[0] );
+  }
+  
+  NumericVector alpha_out = alpha[Range(burn_in+1, iter)];
+  NumericVector delta_out = delta[Range(burn_in+1, iter)];
+  NumericVector sigma_nu_out = sigma_nu[Range(burn_in+1, iter)];
+  
+  NumericVector E_h(iter-burn_in, 0.0);
+  NumericVector Var_h(iter-burn_in, 0.0);
+  NumericVector tmp(t);
+  for(int i=1; i<=(iter-burn_in); i++){
+    for(int k=1; k<=t; k++){
+      tmp[k-1] = h(burn_in + i -1, k);
+    }
+    E_h[i-1] = mean(tmp);
+    Var_h[i-1] = var(tmp);
+  }
+  
+  NumericVector ret_vec(6);
+  ret_vec[0] = mean(alpha[Range(burn_in, iter)]);
+  ret_vec[1] = mean(delta[Range(burn_in, iter)]);
+  ret_vec[2] = mean(sigma_nu[Range(burn_in, iter)]);
+  ret_vec[3] = mean(pow(E_h, 2));
+  ret_vec[4] = mean(Var_h);
+  ret_vec[5] = reject_cnt;
+  
+  return ret_vec;
+}
+'
+
+sourceCpp(code = sv_mcmc_mean_str)
+```
+
+
+```{r, cache=TRUE}
+rand_seed <- sample(1:10^8, size=rep_time)
+
+sv_expr <- sapply(1:rep_time, function(x){
+  set.seed(rand_seed[x])
+
+  y <- sv_generate(alpha, delta, sigma_nu, period)
+  result <- try(sv_mcmc_mean_cpp(y, iter, burn_in),silent=FALSE)
+
+  if(class(result) == "try-error") result <- rep(NA, 6)
+
+  return(result)
+})
+```
+
+```{r, include=FALSE}
+for(i in 1:rep_time){
+  if(is.na(sv_expr[1,i])){
+    set.seed(rand_seed[i]+1)
+
+    y <- sv_generate(alpha, delta, sigma_nu, period)
+    result <- try(sv_mcmc_mean_cpp(y, iter, burn_in),silent=FALSE)
+
+    sv_expr[,i] <- result
+  }
+}
+```
+
+Summary for the numerical study
+```{r}
+summary_cal <- function(vec, true){
+  mean <- mean(vec)
+  sd <- sd(vec)
+  rmse <- sqrt( mean( (vec - true)^2 ) )
+
+  return( c(mean, sd, rmse) )
+}
+
+summary_function <- function(mat){
+  E_h <- 0.0009
+  Var_h <- 0.0009^2
+  reject_cnt <- 0.2
+
+  mat["reject_cnt",] <- mat["reject_cnt",] / (period*iter)
+  info_mat <- matrix(nrow=4, ncol=nrow(mat),
+                     dimnames=list( c("true", "mean", "sd", "RMSE"), rownames(mat) ))
+
+  for(i in rownames(mat)){
+    info_mat[,i] <- c(get(i), summary_cal(mat[i,], get(i)))
+  }
+
+  return(info_mat)
+}
+```
+
+Fail to recover the true parameter.
+```{r, cache=TRUE}
+para_name <- c("alpha", "delta", "sigma_nu", "E_h", "Var_h", "reject_cnt")
+rownames(sv_expr) <- para_name
+
+summary_function(sv_expr)
+```
+
+
+
+Questions and Reflections:
+(1) Difference between repeat rate and rejection rate here
+
+(2) inverse-gamma and gamma transformation
+We can observe that the distribution for $Y\sim invGamma(\alpha,\beta)$ is identical to the distribution of 1/X, where $X\sim Gamma(\alpha, \beta)$.
+```{r}
+# for gamma distribution
+alpha = 2
+rate = 3
+
+x.base<- 1/rgamma(10000, shape = alpha, rate = rate)
+
+ggplot(data.frame(x = x.base), aes(x=x)) + geom_density() +
+  ggtitle(paste("Stats package: shape", alpha, "rate ", rate)) + xlim(c(0, 60))
+
+# for inverse gamma distribution
+sims.1<- rinvgamma(10000, shape = alpha, rate = rate)
+ggplot(data.frame(x = sims.1), aes(x=x)) + geom_density() +
+  ggtitle(paste("Package (invgamma) shape", alpha, " rate ", rate, sep = ""))+
+  xlim(c(0, 60))
+```
+
+However, we can get the same result from dgamma and dinvgamma, i.e. P(X=2) = P(Y=1/2)
+```{r}
+dgamma(2, shape=alpha, rate=rate)
+dinvgamma(1/2, shape=alpha, rate=rate)
+```
+
+(3) About convergence:
+I think it will largely depend on h's initial value. Consider two initial h values
+under $\alpha=-0.5, \delta=0.5, \sigma_{\nu}=0.26$.
+(a) $h_t = y_t^2$(the observed log-return)
+(b) $h_0 = mean(y_t^2)$, $h_t = exp(\alpha+\delta \log{h_{t-1}}+\sigma_{\nu}\epsilon_t)$.
+
+For (a), it's author's initial value for h.
+```{r error=TRUE}
+set.seed(7654321)
+iter = 20
+
+y <- sv_generate(alpha=-0.368, delta=0.95, sigma_nu=0.26, period=1000)
+t <- length(y)
+
+# create the store vector, the first component is the initial value
+alpha <- c(-0.5, rep(0, iter))
+# bound on (-1, 1) for stationarity
+delta <- c(0.5, rep(0, iter))
+sigma_nu <- c(1, rep(0, iter))
+h <- matrix(data=NA, nrow=iter+1, ncol=t+2,
+            dimnames=list(seq(1,iter+1), paste0('h_',seq(0,t+1))) )
+
+# for h's initial value
+# h_1 to h_T
+h[1, 1] <- mean(y^2)
+h[1, t+2] <- mean(y^2)
+h[1, 2:(t+1)] <- y^2
+
+reject_cnt <- 0
+
+v0 <- 1
+s0 <- 0.005
+a0 <- v0/2
+b0 <- 1/2 * v0 * s0^2
+sigma2_0 <- rinvgamma(1, shape=a0, rate=b0)
+mu_0 <- c(0, 0)
+delta0 <- solve(matrix(c(100, 0, 0, 10), ncol=2)/sigma2_0)
+
+store_list <- list()
+for(i in 2:(iter+1)){
+  # for new alpha, delta, sigma_nu
+  # run a linear regression to find mean and sd for alpha and delta, 
+  # log(h_{t+1}) ~ log(h_{t})
+  
+  y_lm <- log(h[i-1, 3:(t+1)])
+  X <- matrix(c(rep(1, t-1), log(h[i-1, 2:t])), ncol=2)
+  
+  model <- lm( y_lm ~ X )
+  coef <- coef(summary(model))[, c("Estimate")]
+  
+  X_dot <- t(X) %*% X
+  mu_n <- solve( X_dot + delta0 ) %*% (delta0 %*% mu_0 + X_dot %*% coef)
+  delta_n <- X_dot + delta0
+  an <- a0 + (t-1)/2
+  bn <- b0 + 1/2*( t(y_lm) %*% y_lm - t(mu_n) %*% delta_n %*% mu_n)
+  
+  sigma_nu[i] <- sqrt(rinvgamma(1, shape=an, rate=bn))
+  omega <- rmvnorm(1, mu_n, solve(delta_n)*sigma_nu[i]^2)
+  alpha[i] <- omega[1]
+  delta[i] <- omega[2]
+  
+  # for tons of h, h_1 to h_T
+  # *1 and *2 are parameters for inverse gamma phi(shape) and theta(scale)
+  # *1
+  # for phi, sigma, phi1 and phi_LN are hyperparameters
+  sigma <- sqrt( sigma_nu[i]^2 / (1 + delta[i]^2) )
+  phi_LN = (1 - 2*exp(sigma^2)) / (1 - exp(sigma^2))
+  phi1 = -0.5
+  phi = phi1 + phi_LN - 1
+  
+  # update h_0
+  h[i, 1] <- exp( alpha[i] + delta[i]*log(h[i-1, 2]) + sigma_nu[i]*rnorm(1, 0, 1) )
+  
+  # index 1 is t=0, so this loop iterate from t=1 to t=T
+  store_mat <- matrix(nrow=1000, ncol=3, dimnames=list(1:1000, c("h_temp","acc_prob","iter")))
+  for(j in 2:(t+1)){
+    # *2
+    # for theta, mu_t, theta1_t and theta_LN_t are hyperparameters
+    mu_t = ( alpha[i]*(1-delta[i]) + delta[i]*( log(h[i-1, j+1]) + log(h[i, j-1]) ) ) /
+      (1 + delta[i]^2)
+    theta1_t = y[j-1]^2 / 2
+    theta_LN_t = (phi_LN - 0.5) * exp(mu_t + 0.5*sigma^2)
+    theta_t = theta1_t + theta_LN_t
+      
+    # candidate h for t=j-1
+    h_temp <- rinvgamma(1, shape=phi, rate=theta_t)
+    q_value <- dinvgamma(h_temp, shape=phi, rate=theta_t)
+    p_value <- (1 / h_temp^0.5) * exp(-y[j-1]^2 / (2*h_temp)) * (1 / h_temp) *
+      exp(-(log(h_temp) - mu_t)^2 / (2*sigma^2)) 
+    
+    q_mode <- theta_t / (phi+1)
+    p_mode_value <- (1 / q_mode^0.5) * exp(-y[j-1]^2 / (2*q_mode)) * (1 / q_mode) *
+      exp(-(log(q_mode) - mu_t)^2 / (2*sigma^2)) 
+    q_mode_value <- dinvgamma(q_mode, shape=phi, rate=theta_t)
+    c <- 1.1 * p_mode_value / q_mode_value
+    
+    # decide whether accept this draw
+    if(q_value == 0){
+      accept_prob <- 1
+    }else if(q_value == Inf){
+      accept_prob <- 0
+    }else{
+      accept_prob <- min( p_value / (c*q_value), 1 )
+    }
+    
+    store_mat[j-1,] <- c(h_temp, accept_prob, i) 
+    
+    # if prob > accept_prob, then repeat, o/w accept
+    prob <- runif(1, 0, 1)
+    if(prob > accept_prob){
+      reject_cnt <- reject_cnt + 1
+      h[i, j] <- h[i-1, j]
+    }else{
+      h[i, j] <- h_temp
+    }
+  }
+  store_list[[i-1]] <- store_mat
+  # update h_{T+1}
+  h[i, t+2] <- exp( alpha[i] + delta[i]*log(h[i, t+1]) + sigma_nu[i]*rnorm(1, 0, 1) )
+}
+```
+```{r}
+plot_df <- store_list[[1]]
+for(k in 2:(i-2)) plot_df <- rbind(plot_df, store_list[[k]])
+plot_df <- as.data.frame(plot_df)
+
+plot_df %>% ggplot(aes(x=log(h_temp), y=acc_prob)) +
+  geom_point(aes(color=iter)) +
+  ggtitle("h become bigger if alpha and sigma_nu become larger") +
+  xlab("log(h)") +
+  ylab("acceptance probability for that proposed h")
+
+matrix(c(alpha[2:(i-1)], delta[2:(i-1)], sigma_nu[2:(i-1)]), nrow=3, byrow=TRUE,
+       dimnames=list(c("alpha", "delta", "sigma_nu"), paste0("iter",1:(i-2)))) %>% round(., 3)
+```
+The randomized initial h leads to large negative $\alpha$ (intercept) and small $\delta$, since the correlation between $h_t$ and $h_{t+1}$ is weak. Also, it will lead to large $\sigma_{\nu}$. However, when $\alpha$ and $\sigma_{\nu}$ become larger, model will propose large h and make $\alpha$ and $\sigma_{\nu}$ larger! Eventually, the model will not converge.  
+
+
+Reference:
+[1] Eric Jacquier, Nicholas G. Polson, Peter E. Rossi(2004), Bayesian analysis of stochastic volatility models with fat-tails and correlated errors. $\textit{Journal of Econometrics}$
+
+[2] Eric Jacquier, Nicholas G. Polson, Peter E. Rossi(1994), Bayesian analysis of Stochastic Volatility Models. $\textit{Journal of Business & Economic Statistic}$
+
+[3] Masaki E. Tsuda, Rcpp for Everyone
