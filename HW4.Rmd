@@ -1,0 +1,51 @@
+---
+title: "Hw4"
+author: "B04303061 丁立恆"
+date: "2021/5/11"
+output: word_document
+---
+
+```{r}
+library(bootstrap)
+library(boot)
+data(scor)
+```
+
+Let $\lambda_1,\lambda_2,...,\lambda_5$ be the eigenvalues of the covariance matrix of "scor"
+
+(1) Use bootstrap to estimate the bias and standard error of $\hat{\theta}$
+When there are 2000 replicates, bias = 0.0031, sd = 0.0465.
+```{r}
+set.seed(20210511)
+
+ratio_function <- function(x, i){
+  cov_mat <- cov(x[i,])
+  eigenvalue <- eigen(cov_mat, symmetric = TRUE, only.values = TRUE)$values
+  lambda1 <- sort(eigenvalue, decreasing = TRUE)[1]
+  ratio <- lambda1 / sum(eigenvalue)
+  
+  return(ratio)
+}
+
+result1 <- boot(data = scor, statistic = ratio_function, R = 2000)
+result1
+```
+
+(2) Obtain the jackknife estimates of bias and standard error of $\hat{\theta}$
+```{r}
+n <- NROW(scor)
+real_value <- result1$t0
+jackknife_vec <- rep(0, n)
+for(i in 1:n){
+  jackknife_vec[i] <- ratio_function(scor, (-1)*i)
+}
+
+jackknife_bias <- (n - 1) * (mean(jackknife_vec) - real_value)
+jackknife_sd <- sqrt((n - 1) * mean((jackknife_vec - mean(jackknife_vec))^2) )
+list(bias = jackknife_bias, sd = jackknife_sd)
+```
+
+(3) Compute 95% percentile and BCa confidence intervals for $\hat{\theta}$
+```{r}
+boot.ci(result1, conf = 0.95, type = c("perc", "bca"))
+```

@@ -1,0 +1,104 @@
+---
+title: "HW3"
+author: "B04303061 丁立恆"
+date: "2021/4/14"
+output: word_document
+---
+
+```{r, include=FALSE}
+library(ggplot2)
+library(tidyverse)
+```
+
+```{r}
+sample_cnt <- 20
+alpha_set <- seq(0.01, 0.2, by=0.01)
+```
+
+1. chi-square(1)
+```{r}
+hypothesis_x2 <- function(alpha, n, m){
+  set.seed(20210420)
+  p_value <- rep(0,m)
+  
+  for(i in 1:m){
+    chi <- rchisq(n, 1)
+    crit_boundary <- (mean(chi) - 1)/(sd(chi)/sqrt(n))
+    
+    if(crit_boundary >= 0){
+      p_value[i] <- pt(crit_boundary*(-1), n) * 2
+    }else{
+      p_value[i] <- pt(crit_boundary, n) * 2
+    }
+  }
+  
+  return(p_value)
+}
+
+emp_type1 <- sapply(alpha_set, function(x) hypothesis_x2(alpha=x, n=sample_cnt, m=10^4))
+emp_type_rate1 <- sapply(1:NCOL(emp_type1), function(x) mean(emp_type1[,x] < alpha_set[x]))
+```
+
+2. uniform(0, 2)
+```{r}
+hypothesis_unif <- function(alpha, n, m){
+  set.seed(20210420)
+  p_value <- rep(0,m)
+  
+  for(i in 1:m){
+    chi <- runif(n, 0, 2)
+    crit_boundary <- (mean(chi) - 1)/(sd(chi)/sqrt(n))
+    
+    if(crit_boundary >= 0){
+      p_value[i] <- pt(crit_boundary*(-1), n) * 2
+    }else{
+      p_value[i] <- pt(crit_boundary, n) * 2
+    }
+  }
+  
+  return(p_value)
+}
+
+emp_type2 <- sapply(alpha_set, function(x) hypothesis_unif(alpha=x, n=sample_cnt, m=10^4))
+emp_type_rate2 <- sapply(1:NCOL(emp_type2), function(x) mean(emp_type2[,x] < alpha_set[x]))
+```
+
+3. exponential(1)
+```{r}
+hypothesis_exp <- function(alpha, n, m){
+  set.seed(20210420)
+  p_value <- rep(0,m)
+  
+  for(i in 1:m){
+    chi <- rexp(n, 1)
+    crit_boundary <- (mean(chi) - 1)/(sd(chi)/sqrt(n))
+    
+    if(crit_boundary >= 0){
+      p_value[i] <- pt(crit_boundary*(-1), n) * 2
+    }else{
+      p_value[i] <- pt(crit_boundary, n) * 2
+    }
+  }
+  
+  return(p_value)
+}
+
+emp_type3 <- sapply(alpha_set, function(x) hypothesis_exp(alpha=x, n=sample_cnt, m=10^4))
+emp_type_rate3 <- sapply(1:NCOL(emp_type3), function(x) mean(emp_type3[,x] < alpha_set[x]))
+```
+
+Visualization
+```{r}
+df <- data.frame(alpha_set, emp_type_rate1, emp_type_rate2, emp_type_rate3)
+colnames(df) <- c("real_alpha", "chi_square", "uniform", "exponential")
+
+df <- df %>%
+  select(real_alpha, chi_square, uniform, exponential) %>%
+  gather(key = "variable", value = "value", - real_alpha)
+
+ggplot(data=df, aes(x=real_alpha, y=value)) +
+  geom_line(aes(color=variable)) +
+  geom_point() +
+  ggtitle("Empirical type I error in different significant levels") +
+  ylab("Empirical type I error")
+```

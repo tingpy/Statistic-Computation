@@ -1,0 +1,104 @@
+---
+title: "Stat Computing HW2"
+author: "B04303061 丁立恆"
+date: "2021/3/27"
+output: word_document
+---
+
+```{r, include=FALSE}
+library(ggplot2)
+```
+
+Q1.
+In this question, I proposed $f_1 = \dfrac{1}{\sqrt{2\pi}} e^{-\dfrac{(x-1)^2}{2}}$ and $f_2 = \dfrac{1}{\sqrt{2\pi}} e^{-\dfrac{x^2}{2}}$ as envelopes.  
+
+First, we visualize those candidates and our target function by density plot.
+As the result, I think the variance of applying f1 will be smaller because its curve is more similar to g(x) than f2.
+```{r}
+target = data.frame(x = seq(1, 20, 0.1),
+                    density = sapply(seq(1, 20, 0.1), 
+                                     function(x) x^2/sqrt(2*pi)*exp(-x^2/2)))
+
+ggplot(target)+
+  geom_line(aes(x = x, y = density),color="blue")+
+  stat_function(fun=dnorm, args=list(mean=1, sd=1), color="red")+
+  stat_function(fun=dnorm, args=list(mean=0, sd=1), color="black")
+```
+
+Because $\int_{1}^{\infty} \frac{x^2}{\sqrt{2\pi}} e^{-\frac{x^2}{2}} dx$ is $\frac{1}{2} - \int_{0}^{1} \frac{x^2}{\sqrt{2\pi}} e^{-\frac{x^2}{2}} dx$, we 
+calculate $\frac{1}{2} - \int_{0}^{1} \frac{g(x)}{f(x)} f(x) dx$ to get $\int_{1}^{\infty}g(x)dx$<br>
+
+In this case, $\frac{g(x)}{f_1(x)} = x^2 e^\frac{-2x+1}{2}$, $\frac{g(x)}{f_2(x)} = x^2$
+```{r}
+set.seed(20210327)
+draw <- 10^5
+
+# For f1, N(1,1)
+gf1 <- function(x) x^2 * exp(- (2*x+1) / 2)
+norm1 <- sapply(1:draw, function(x){
+  while(TRUE){
+    temp <- rnorm(1,1,1)
+    if(temp >=0 & temp <= 1)
+      return(temp)
+  }
+})
+integral1 <- sapply(norm1, gf1)
+
+# For f2, N(0,1)
+gf2 <- function(x) x^2
+norm2 <- sapply(1:draw, function(x){
+  while(TRUE){
+    temp <- rnorm(1,0,1)
+    if(temp >=0 & temp <= 1)
+      return(temp)
+  }
+})
+integral2 <- sapply(norm2, gf2)
+
+se <- round(c(sd(integral1), sd(integral2)), 4)
+names(se) <- c('se for f1', 'se for f2')
+se
+```
+
+Estimate $\int_1^{\infty} g(x)dx$ by important sampling
+```{r}
+0.5 - mean(integral1)
+```
+
+Q2. 
+First, we calculate the optimal constant c in control variate. Here f is the integral we want to estimate, and g is the control variate.
+```{r}
+set.seed(20210327)
+draw <- 10^5
+uniform_var <- runif(draw, min=0, max=10)
+f <- function(x) x / (2 + x^0.25)
+g <- function(x) x
+f_x <- sapply(uniform_var, f)
+g_x <- sapply(uniform_var, g)
+c <- - cov(f_x, g_x) / var(g_x)
+```
+
+Second, we estimate the integral by control variate
+```{r}
+# 5 is the theoretical expected value for E(g(x))
+# (10 - 0) is because the integrate area is 0 to 10
+control_integral <- mean(f_x + c*(g_x - 5)) * (10 - 0)
+control_integral
+```
+
+Third, we simulate the integral by Monte Carlo simulation.
+```{r}
+set.seed(20210327)
+uniform_var <- runif(draw, min=0, max=1)
+monte_f <- function(x) 100*x / (2 + (10*x)^0.25)
+monte_f_x <- sapply(uniform_var, monte_f)
+mean(monte_f_x)
+```
+
+Last, we calculate the variance reduction by using control variate
+The theoretical reduction is $-Cov(f(x),g(x))^2/Var(g(x)))$
+```{r}
+monte_var <- var(monte_f_x)
+control_var <- var((f_x + c*(g_x - 5))*10)
+(monte_var - control_var) / monte_var
+```

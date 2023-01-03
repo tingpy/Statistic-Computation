@@ -1,0 +1,107 @@
+---
+title: "MCMC homework"
+author: "B04303061 丁立恆"
+date: "2021/6/12"
+output: word_document
+---
+
+Q1. MCMC for Ralyeigh distribution
+```{r}
+set.seed(20210612)
+
+# Ralyeigh distribution
+sigma <- 2
+f1 <- function(x) x/sigma^2 * exp(-x^2/(2*sigma))
+
+# proposal distribution (gamma(x0, 1))
+x0 <- 3
+iter <- 20000
+sample <- c(rgamma(1, x0, 1), rep(0, iter))
+for(i in 2:(iter+1)){
+  # draw a proposal sample
+  tmp <- rgamma(1, sample[i-1], 1)
+  accept_prob <- ( f1(tmp)*dgamma(sample[i-1], tmp, 1) ) /
+    ( f1(sample[i-1])*dgamma(tmp, sample[i-1], 1) )
+  prob <- runif(1, 0, 1)
+  
+  # accept or reject
+  if(prob <= accept_prob){
+    sample[i] <- tmp
+  }else{
+    sample[i] <- sample[i-1]
+  }
+}
+```
+
+```{r}
+burn_in <- 5000
+sample <- sample[(burn_in+1):iter]
+plot(density(sample), main="Metropolis for Ralyeigh Dist.")
+```
+
+
+
+Q2 Gibb sampler to generate sample from 
+```{r}
+Gelman.Rubin <- function(psi) {
+   # psi[i,j] is the statistic psi(X[i,1:j])
+   # for chain in i-th row of X
+   psi <- as.matrix(psi)
+   n <- ncol(psi)
+   k <- nrow(psi)
+   
+   psi.means <- rowMeans(psi) #row means
+   B <- n * var(psi.means) #between variance est.
+   psi.w <- apply(psi, 1, "var") #within variances
+   W <- mean(psi.w) #within est.
+   v.hat <- W*(n-1)/n + (B/n) #upper variance est.
+   r.hat <- v.hat / W #G-R statistic
+   
+   return(r.hat)
+}
+```
+
+```{r}
+set.seed(20210613)
+
+k <- 4 # chains
+iter <- 20000
+burn_in <- 5000
+
+bi_den <- function(iter, burn_in){
+  n <- 15
+  a <- 3
+  b <- 7
+  
+  y <- c(rbeta(1, a, b), rep(0, iter))
+  x <- c(rbinom(1, n, y[1]), rep(0, iter))
+  for(i in 2:(iter+1)){
+    x[i] <- rbinom(1, n, y[i-1])
+    y[i] <- rbeta(1, a+x[i], n-x[i]+b)
+  }
+  
+  return(list(x=x[(burn_in+1): iter], y=y[(burn_in+1): iter]))
+}
+
+X <- matrix(0, nrow=k, ncol=iter-burn_in )
+Y <- matrix(0, nrow=k, ncol=iter-burn_in )
+for(i in 1:k){
+  generate_sample <- bi_den(iter, burn_in)
+  X[i,] <- generate_sample[["x"]]
+  Y[i,] <- generate_sample[["y"]]
+}
+
+psi_x <- t(apply(X, 1, cumsum))
+psi_y <- t(apply(Y, 1, cumsum))
+for(i in 1:nrow(psi_x)){
+  psi_x[i,] <- psi_x[i,] / (1:ncol(psi_x))
+  psi_y[i,] <- psi_y[i,] / (1:ncol(psi_y))
+}
+
+c(Gelman.Rubin(psi_x), Gelman.Rubin(psi_y))
+```
+From the above information, we can say the Gibb samplers converge to our target distribution. But the rhat is on the edge, so maybe we should increase iteration.
+
+```{r}
+plot(X[1,],Y[1,], main="beta-binomial",)
+```
