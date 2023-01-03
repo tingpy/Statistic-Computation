@@ -1,0 +1,99 @@
+---
+title: "BUGS"
+author: "B04303061 丁立恆"
+date: "2021/6/12"
+output: word_document
+---
+
+```{r, include=FALSE}
+library(R2WinBUGS)
+library(R2jags)
+library(coda)
+library(LearnBayes)
+```
+
+```{r}
+# import data in LearnBayes
+data(bermuda.grass)
+
+N <- c(0, 100, 200, 400)
+P <- c(0, 22, 44, 88)
+K <- c(0, 42, 84, 168)
+
+row_cnt <- NROW(bermuda.grass)
+bermuda.grass[,2] <- sapply(1:64, function(x) N[bermuda.grass[x,2]+1])
+bermuda.grass[,3] <- sapply(1:64, function(x) P[bermuda.grass[x,3]+1])
+bermuda.grass[,4] <- sapply(1:64, function(x) K[bermuda.grass[x,4]+1])
+```
+
+```{r}
+#construct WinBUGS model
+model_code = "
+model {
+  for(i in 1:N_cnt){
+    y[i] ~ dgamma(nu, mu[i])
+    mu[i] <- nu*eta[i]
+    eta[i] <- 1/yhat[i]
+    yhat[i] <- beta[1] + beta[2]/(N[i]+alpha1) + beta[3]/(P[i]+alpha2) + beta[4]/(K[i]+alpha3)
+  }
+  
+  nu ~ dgamma(0.01, 0.01)
+  alpha1 ~ dnorm(40, 1/100)
+  alpha2 ~ dnorm(22, 1/100)
+  alpha3 ~ dnorm(32, 1/100)
+  beta[1] ~ dnorm(0, 1/10000)
+  for(j in 2:4){
+    beta[j] ~ dnorm(0, 1/10000)I(0,)
+  }
+}
+"
+
+writeLines(model_code, con="BUGS.bug")
+```
+
+```{r}
+# prepare data
+set.seed(20210613)
+
+create_init <- function(x){
+  list("alpha1"=rnorm(1, 40, 10), "alpha2"=rnorm(1, 22, 10),
+       "alpha3"=rnorm(1, 32, 10), "beta"=rep(50, 4), "nu"=1)
+}
+
+data = list(N_cnt = row_cnt,
+            y = bermuda.grass[,"y"],
+            N = bermuda.grass[,"Nit"],
+            P = bermuda.grass[,"Phos"],
+            K = bermuda.grass[,"Pot"])
+
+param <- c("alpha1", "alpha2", "alpha3", "beta", "nu")
+
+# 4 chains, with 11000 iterations, burn in first 10000
+# keep 4000 simulations
+jags.fit <- jags(data=data, n.chains=4, n.iter=11000, n.burnin=10000,
+                 parameters.to.save=param, model.file="BUGS.bug",
+                 inits=lapply(1:4, function(x) create_init(x)))
+```
+
+
+Summary(1): Table for posterior mean and sd for each parameter
+```{r}
+coef_mat <- matrix(0, nrow=2, ncol=8,
+                   dimnames=list(c("mean", "sd"),
+                                 c(paste0("alpha",1:3), paste0("beta", 0:3), "nu")) )
+
+mean_vec <- unlist(jags.fit[["BUGSoutput"]][["mean"]])
+sd_vec <- unlist(jags.fit[["BUGSoutput"]][["sd"]])
+reserve <- !(names(mean_vec) %in% c("deviance"))
+
+coef_mat["mean",] <- mean_vec[reserve]
+coef_mat["sd",] <- sd_vec[reserve]
+coef_mat
+```
+
+
+Summary(2): Diagnosis (analysis by Gelman-Rubin Diagnostic(Rhat))
+Some parameters don't converge well(their rhat exceed 1.1). As the result, we should increase the iterations.
+```{r}
+jags.fit
+```
